@@ -1,0 +1,142 @@
+name: xtd-2
+
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      BUILD_TITLE:
+        description: 'Custom Build Title'
+        required: false
+      KERNEL_TREE:
+        description: 'Kernel Tree'
+        default: 'https://github.com/yetanotherguyx2/android_kernel_xiaomi_sm8250'
+        required: true
+      KERNEL_TREE_BRANCH:
+        description: 'Kernel Tree Branch'
+        required: true
+        default: 'uvite'
+      CODENAME:
+        description: 'Phone Codename'
+        default: 'alioth'
+        required: true
+      UPLOAD_TO_RELEASE:
+        description: 'Upload to release'
+        type: boolean
+        default: false
+
+jobs:
+  build:
+    if: github.event.repository.owner.id == github.event.sender.id
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+    # SUGESTÃO: Actions atualizadas para versões mais recentes
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.9'
+
+    - name: Generate Build Date
+      id: build_date
+      run: |
+        build_date=$(date +"%Y%m%d")
+        echo "build_date=$build_date" >> $GITHUB_OUTPUT
+
+    - name: Initialize workspace
+      id: workspace
+      run: |
+        mkdir workspace
+        cd workspace
+        echo "workspace-folder=$(pwd)" >> $GITHUB_OUTPUT
+        echo "start_time=$(date +%s)" >> $GITHUB_OUTPUT
+        echo "build_title=${{ github.event.inputs.BUILD_TITLE || github.event.inputs.CODENAME }}" >> $GITHUB_OUTPUT
+
+    - name: Prepare the build environment
+      id: tools
+      working-directory: ${{ steps.workspace.outputs.workspace-folder }}
+      run: |
+        sudo apt update -y
+        sudo apt install -y flex bison libncurses-dev libssl-dev bc build-essential git imagemagick
+        wget https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r547379.tar.gz -O clang.tar.gz
+        mkdir clang
+        tar -xf clang.tar.gz -C clang
+        echo "tools-folder=$(pwd)/clang" >> $GITHUB_OUTPUT
+
+    - name: Clone kernel source
+      id: kernel
+      working-directory: ${{ steps.workspace.outputs.workspace-folder }}
+      run: |
+        git clone --depth=1 ${{ github.event.inputs.KERNEL_TREE }} -b ${{ github.event.inputs.KERNEL_TREE_BRANCH }} kernel_tree
+        echo "kernel-folder=$(pwd)/kernel_tree" >> $GITHUB_OUTPUT
+
+    - name: Building kernel
+      id: build
+      working-directory: ${{ steps.kernel.outputs.kernel-folder }}
+      run: |
+        export ARCH=arm64
+        export SUBARCH=ARM64
+        export KBUILD_BUILD_USER="Fran"
+        export KBUILD_BUILD_HOST="Github"
+        make O=out vendor/alioth_defconfig PATH="${{ steps.tools.outputs.tools-folder }}/bin:$PATH"
+        make O=out CC=clang -j$(nproc --all) PATH="${{ steps.tools.outputs.tools-folder }}/bin:$PATH" CROSS_COMPILE=aarch64-linux-gnu- LLVM=1 LLVM_IAS=1
+        echo "elapsed_time=$(echo "$(date +%s)"-"${{ steps.workspace.outputs.start_time }}" | bc)" >> $GITHUB_OUTPUT
+
+    # CORREÇÃO: Novo passo para verificar quais arquivos existem e preparar para upload
+    - name: Prepare Upload Files
+      if: ${{ github.event.inputs.UPLOAD_TO_RELEASE == 'true' }}
+      id: prepare_files
+      run: |
+        file_list=""
+        base_path="${{ steps.kernel.outputs.kernel-folder }}/out/arch/arm64/boot"
+        if [ -f "$base_path/Image" ]; then file_list="$file_list $base_path/Image"; fi
+        if [ -f "$base_path/dtb" ]; then file_list="$file_list $base_path/dtb"; fi
+        if [ -f "$base_path/dtbo.img" ]; then file_list="$file_list $base_path/dtbo.img"; fi
+        echo "files_to_upload=$file_list" >> $GITHUB_OUTPUT
+
+    - name: Upload to Release
+      if: ${{ github.event.inputs.UPLOAD_TO_RELEASE == 'true' }}
+      uses: softprops/action-gh-release@v2
+      with:
+        # CORREÇÃO: Usa a lista de arquivos que foi verificada no passo anterior
+        files: ${{ steps.prepare_files.outputs.files_to_upload }}
+        name: ${{ github.event.inputs.CODENAME }}-${{ steps.build_date.outputs.build_date }}
+        tag_name: ${{ github.event.inputs.CODENAME }}-${{ steps.build_date.outputs.build_date }}
+        body: |
+          Kernel Build Succeeded ✅
+          ${{ steps.workspace.outputs.build_title }}
+          Kernel successfully built!, took ${{ steps.build.outputs.elapsed_time }} seconds.
+          📱 Device Codename: `${{ github.event.inputs.CODENAME }}`
+          Kernel tree: ${{ github.event.inputs.KERNEL_TREE }}/tree/${{ github.event.inputs.KERNEL_TREE_BRANCH }}
+          Action: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          Workflow File: ${{ github.workflow }}.yml
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - uses: actions/upload-artifact@v4
+      if: ${{ success() && github.event.inputs.UPLOAD_TO_RELEASE != 'true' }}
+      with:
+        name: Image
+        path: ${{ steps.kernel.outputs.kernel-folder }}/out/arch/arm64/boot/Image
+        # CORREÇÃO: Ignora o erro se o arquivo não existir
+        if-no-files-found: ignore
+
+    - uses: actions/upload-artifact@v4
+      if: ${{ success() && github.event.inputs.UPLOAD_TO_RELEASE != 'true' }}
+      with:
+        name: dtb
+        path: ${{ steps.kernel.outputs.kernel-folder }}/out/arch/arm64/boot/dtb
+        # CORREÇÃO: Ignora o erro se o arquivo não existir
+        if-no-files-found: ignore
+
+    - uses: actions/upload-artifact@v4
+      if: ${{ success() && github.event.inputs.UPLOAD_TO_RELEASE != 'true' }}
+      with:
+        name: dtbo.img
+        path: ${{ steps.kernel.outputs.kernel-folder }}/out/arch/arm64/boot/dtbo.img
+        # CORREÇÃO: Ignora o erro se o arquivo não existir
+        if-no-files-found: ignore
+        
